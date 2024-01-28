@@ -4,6 +4,8 @@
 .DS_Store
 .cache/
 .clangd/
+.idea/
+.vs/
 build/
 __pycache__/
 compile_commands.json
