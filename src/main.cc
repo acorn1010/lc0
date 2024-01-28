@@ -37,6 +37,7 @@
 #include "utils/esc_codes.h"
 #include "utils/logging.h"
 #include "version.h"
+#include "net/httplib.h"
 #include <vector>
 
 struct BotDifficultySettings {
@@ -75,6 +76,28 @@ BotDifficultySettings getMovetime(float difficulty) {
   return {600, 18};
 }
 
+class Date {
+ public:
+  /** Returns the current Unix timestamp since the Unix Epoch in milliseconds. */
+  static long long now() {
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(duration)
+        .count();
+  }
+};
+
+std::string getPromotionAsString(lczero::Move::Promotion promotion) {
+  using namespace lczero;
+  switch (promotion) {
+    case Move::Promotion::Bishop: return "b";
+    case Move::Promotion::Knight: return "n";
+    case Move::Promotion::Queen: return "q";
+    case Move::Promotion::Rook: return "r";
+  }
+  return "";
+}
+
 int main(int argc, const char** argv) {
   using namespace lczero;
   EscCodes::Init();
@@ -84,49 +107,73 @@ int main(int argc, const char** argv) {
   CERR << "|_ |_ |_|" << EscCodes::Reset() << " v" << GetVersionStr()
        << " built " << __DATE__;
 
-  try {
-    InitializeMagicBitboards();
+  InitializeMagicBitboards();
 
-    OptionsParser parser;
-    EngineController engine(
-        std::make_unique<CallbackUciResponder>(
-            [](const BestMoveInfo& info) {
-              std::cout << "BEST MOVE: " << info.bestmove.from().as_string() << " : " << info.bestmove.to().as_string() << std::endl;
-            },
-            [](const std::vector<ThinkingInfo>& info) {
-              std::cout << "THINKING..." << std::endl;
-              for (const auto &row : info) {
-                std::cout << "row: " << row.depth << ", " << row.score.value() << ", "
-                          << row.comment << std::endl;
+  std::optional<httplib::Response *> optionalRes;
+  OptionsParser parser;
+  long long start;
+  EngineController engine(
+      std::make_unique<CallbackUciResponder>(
+          [&optionalRes, &start](const BestMoveInfo& info) {
+            if (optionalRes.has_value()) {
+              std::stringstream ss;
+              ss << "{";
+              ss << "\"result\":{";
+
+              ss << "\"from\":\"" << info.bestmove.from().as_string() << "\"";
+              ss << ",\"to\":\"" << info.bestmove.to().as_string() << "\"";
+              const std::string& promotion = getPromotionAsString(info.bestmove.promotion());
+              if (!promotion.empty()) {
+                ss << ",\"promotion\":\"" << getPromotionAsString(info.bestmove.promotion()) << "\"";
               }
-            }),
-        parser.GetOptionsDict());
-    engine.PopulateOptions(&parser);
 
-    // Ordinary UCI engine.
-    // EngineLoop loop;
-//      loop.RunLoop();
-    std::cout << "Starting new game" << std::endl;
-    // loop.CmdUciNewGame();
-    engine.NewGame();
-    std::cout << "Starting position" << std::endl;
-    // g1 -> f3 seems to be best move from this position
-    engine.SetPosition("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2", {});
-    const auto difficulty = getMovetime(1.0);
-    GoParams goParams;
-    goParams.movetime = difficulty.movetime;
-    goParams.depth = difficulty.depth;
-    engine.Go(goParams);
+              ss << "}";
+              ss << "}";
+              optionalRes.value()->set_content(ss.str(), "application/json");
+              optionalRes.reset();
+              std::cout << "Done: " << (Date::now() - start) << "ms\n";
+            } else {
+              std::cerr << "EXPECTED OPTIONAL RES TO EXIST, BUT IT DIDN'T! RACE CONDITION???\n";
+              abort();
+            }
+          },
+          [](const std::vector<ThinkingInfo>& info) { /* We don't care about when it's thinking */ }),
+      parser.GetOptionsDict());
+  engine.PopulateOptions(&parser);
 
-    while (true) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2'000));
-      std::cout << "Waiting..." << std::endl;
+  Mutex engineMutex;
+  httplib::Server server;
+  server.Get("/", [&start, &engine, &engineMutex, &optionalRes](const httplib::Request &req, httplib::Response &res) {
+    Mutex::Lock lock(engineMutex);  // Ensure we're only running one instance of engine at a time
+
+    try {
+      std::cout << "Starting new game: " << Date::now() << "\n";
+      start = Date::now();
+      engine.NewGame();
+      // g1 -> f3 seems to be best move from this position
+      engine.SetPosition(
+          "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2", {});
+      const auto difficulty = getMovetime(0.4);
+      GoParams goParams;
+      goParams.movetime = difficulty.movetime;
+      goParams.depth = difficulty.depth;
+      optionalRes = &res;
+      engine.Go(goParams);
+
+      while (optionalRes.has_value() && optionalRes.value() == &res) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    } catch (std::exception& e) {
+      std::cerr << "Unhandled exception: " << e.what() << "\n";
+      abort();
     }
+  });
+  server.listen("0.0.0.0", 3002);
 
-  } catch (std::exception& e) {
-    std::cerr << "Unhandled exception: " << e.what() << std::endl;
-    abort();
+  std::cout << "Listening on port 3000...\n";
+  while (true) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2'000));
   }
-
+  
   return 0;
 }
