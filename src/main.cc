@@ -37,6 +37,43 @@
 #include "utils/esc_codes.h"
 #include "utils/logging.h"
 #include "version.h"
+#include <vector>
+
+struct BotDifficultySettings {
+  std::int64_t movetime;
+  int depth;
+};
+
+BotDifficultySettings getMovetime(float difficulty) {
+  if (difficulty <= 0) {
+    return {20, 1};
+  }
+  if (difficulty <= 0.2) {
+    return {20, 1};
+  }
+  if (difficulty <= 0.3) {
+    return {50, 2};
+  }
+  if (difficulty <= 0.4) {
+    return {100, 3};
+  }
+  if (difficulty <= 0.5) {
+    return {150, 4};
+  }
+  if (difficulty <= 0.6) {
+    return {200, 5};
+  }
+  if (difficulty <= 0.7) {
+    return {300, 5};
+  }
+  if (difficulty <= 0.8) {
+    return {400, 8};
+  }
+  if (difficulty <= 0.9) {
+    return {500, 13};
+  }
+  return {600, 18};
+}
 
 int main(int argc, const char** argv) {
   using namespace lczero;
@@ -50,45 +87,46 @@ int main(int argc, const char** argv) {
   try {
     InitializeMagicBitboards();
 
-    CommandLine::Init(argc, argv);
-    CommandLine::RegisterMode("uci", "(default) Act as UCI engine");
-    CommandLine::RegisterMode("selfplay", "Play games with itself");
-    CommandLine::RegisterMode("benchmark", "Quick benchmark");
-    CommandLine::RegisterMode("backendbench",
-                              "Quick benchmark of backend only");
-    CommandLine::RegisterMode("leela2onnx", "Convert Leela network to ONNX.");
-    CommandLine::RegisterMode("onnx2leela",
-                              "Convert ONNX network to Leela net.");
-    CommandLine::RegisterMode("describenet",
-                              "Shows details about the Leela network.");
+    OptionsParser parser;
+    EngineController engine(
+        std::make_unique<CallbackUciResponder>(
+            [](const BestMoveInfo& info) {
+              std::cout << "BEST MOVE: " << info.bestmove.from().as_string() << " : " << info.bestmove.to().as_string() << std::endl;
+            },
+            [](const std::vector<ThinkingInfo>& info) {
+              std::cout << "THINKING..." << std::endl;
+              for (const auto &row : info) {
+                std::cout << "row: " << row.depth << ", " << row.score.value() << ", "
+                          << row.comment << std::endl;
+              }
+            }),
+        parser.GetOptionsDict());
+    engine.PopulateOptions(&parser);
 
-    if (CommandLine::ConsumeCommand("selfplay")) {
-      // Selfplay mode.
-      SelfPlayLoop loop;
-      loop.RunLoop();
-    } else if (CommandLine::ConsumeCommand("benchmark")) {
-      // Benchmark mode.
-      Benchmark benchmark;
-      benchmark.Run();
-    } else if (CommandLine::ConsumeCommand("backendbench")) {
-      // Backend Benchmark mode.
-      BackendBenchmark benchmark;
-      benchmark.Run();
-    } else if (CommandLine::ConsumeCommand("leela2onnx")) {
-      lczero::ConvertLeelaToOnnx();
-    } else if (CommandLine::ConsumeCommand("onnx2leela")) {
-      lczero::ConvertOnnxToLeela();
-    } else if (CommandLine::ConsumeCommand("describenet")) {
-      lczero::DescribeNetworkCmd();
-    } else {
-      // Consuming optional "uci" mode.
-      CommandLine::ConsumeCommand("uci");
-      // Ordinary UCI engine.
-      EngineLoop loop;
-      loop.RunLoop();
+    // Ordinary UCI engine.
+    // EngineLoop loop;
+//      loop.RunLoop();
+    std::cout << "Starting new game" << std::endl;
+    // loop.CmdUciNewGame();
+    engine.NewGame();
+    std::cout << "Starting position" << std::endl;
+    // g1 -> f3 seems to be best move from this position
+    engine.SetPosition("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2", {});
+    const auto difficulty = getMovetime(1.0);
+    GoParams goParams;
+    goParams.movetime = difficulty.movetime;
+    goParams.depth = difficulty.depth;
+    engine.Go(goParams);
+
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2'000));
+      std::cout << "Waiting..." << std::endl;
     }
+
   } catch (std::exception& e) {
     std::cerr << "Unhandled exception: " << e.what() << std::endl;
     abort();
   }
+
+  return 0;
 }
